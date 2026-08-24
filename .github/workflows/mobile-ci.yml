@@ -9,7 +9,7 @@ env:
   PROJECT_TYPE: 'flutter'
   PROJECT_NAME: 'flutter_gha'
   MIN_COVERAGE: '80'
-  ENFORCE_COVERAGE: 'false'
+  ENFORCE_COVERAGE: 'true'
 
 jobs:
   mobile-pipeline:
