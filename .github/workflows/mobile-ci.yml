@@ -1,0 +1,122 @@
+name: Mobile CI
+
+on: [push, pull_request]
+
+env:
+  CI: 'true'
+  LANG: en_US.UTF-8
+  LC_ALL: en_US.UTF-8
+  PROJECT_TYPE: 'flutter'
+  PROJECT_NAME: 'flutter_gha'
+  MIN_COVERAGE: '80'
+  ENFORCE_COVERAGE: 'true'
+
+jobs:
+  mobile-pipeline:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Platform Tools
+        run: |
+          echo "Setting up tools for project type: $PROJECT_TYPE"
+
+          if [ "$PROJECT_TYPE" = "ios" ]; then
+            brew install swiftlint 2>/dev/null || true
+            xcodebuild -version
+
+          elif [ "$PROJECT_TYPE" = "android" ]; then
+            brew install gradle 2>/dev/null || true
+            gradle --version
+
+          elif [ "$PROJECT_TYPE" = "flutter" ]; then
+            flutter --version
+            flutter pub get
+
+          else
+            echo "Unsupported project type: $PROJECT_TYPE"
+            exit 1
+          fi
+
+          if ! command -v fastlane &>/dev/null; then
+            gem install fastlane --no-document -q
+          fi
+          gem install bundler --no-document -q || true
+          bundle install --quiet
+
+      - name: Lint
+        run: fastlane lint
+
+      - name: Test
+        run: fastlane test
+
+      - name: Coverage
+        if: env.ENFORCE_COVERAGE == 'true'
+        run: |
+          echo "Checking coverage for $PROJECT_TYPE (threshold: $MIN_COVERAGE%)"
+
+          if [ "$PROJECT_TYPE" = "flutter" ]; then
+            if [ ! -f coverage/lcov.info ]; then
+              echo "Coverage file not found!"
+              exit 1
+            fi
+
+            TOTAL=$(grep '^LF:' coverage/lcov.info | awk -F: '{sum+=$2} END {print sum}')
+            COVERED=$(grep '^LH:' coverage/lcov.info | awk -F: '{sum+=$2} END {print sum}')
+            SCORE=$((100 * COVERED / TOTAL))
+
+          elif [ "$PROJECT_TYPE" = "android" ]; then
+            FILE=$(find . -name "jacocoTestReport.xml" | head -n 1)
+            if [ -z "$FILE" ]; then
+              echo "Jacoco report not found!"
+              exit 1
+            fi
+
+            COVERED=$(grep -o 'covered="[0-9]*"' "$FILE" | grep -o '[0-9]*' | awk '{sum+=$1} END {print sum}')
+            MISSED=$(grep -o 'missed="[0-9]*"' "$FILE" | grep -o '[0-9]*' | awk '{sum+=$1} END {print sum}')
+            TOTAL=$((COVERED + MISSED))
+            SCORE=$((100 * COVERED / TOTAL))
+
+          elif [ "$PROJECT_TYPE" = "ios" ]; then
+            XCRESULT=$(find build/reports -name "*.xcresult" | head -n 1)
+            if [ -z "$XCRESULT" ]; then
+              echo "No .xcresult found under build/reports!"
+              exit 1
+            fi
+            SCORE=$(xcrun xccov view --report "$XCRESULT" | grep "Line Coverage" | awk '{print int($3)}')
+
+          else
+            echo "Unsupported project type"
+            exit 1
+          fi
+
+          echo "Coverage score: $SCORE%"
+
+          if [ "$SCORE" -lt "$MIN_COVERAGE" ]; then
+            echo "Coverage $SCORE% is below threshold $MIN_COVERAGE%!"
+            exit 1
+          else
+            echo "Coverage check passed: $SCORE% >= $MIN_COVERAGE%"
+          fi
+
+      - name: Build
+        run: fastlane build
+
+      - name: Write Firebase Service Account
+        if: github.ref == 'refs/heads/main'
+        env:
+          FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
+        run: |
+          if [ -n "$FIREBASE_SERVICE_ACCOUNT_JSON" ]; then
+            printf '%s' "$FIREBASE_SERVICE_ACCOUNT_JSON" > firebase-service-account.json
+            echo "FIREBASE_SERVICE_ACCOUNT_JSON=$PWD/firebase-service-account.json" >> $GITHUB_ENV
+          fi
+
+      - name: Release
+        if: github.ref == 'refs/heads/main'
+        env:
+          FIREBASE_APP_ID: ${{ secrets.FIREBASE_APP_ID }}
+          FIREBASE_TESTERS: ${{ secrets.FIREBASE_TESTERS }}
+          FIREBASE_GROUPS: ${{ secrets.FIREBASE_GROUPS }}
+          FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
+        run: fastlane release

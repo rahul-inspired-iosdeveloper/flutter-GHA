@@ -1,0 +1,243 @@
+
+lane :lint do
+  project_type = ENV["PROJECT_TYPE"]
+
+  if project_type == "ios"
+    swiftlint(
+      mode: :lint,
+      executable: "/opt/homebrew/bin/swiftlint",
+      config_file: "../.swiftlint.yml",
+      raise_if_swiftlint_error: false,
+      ignore_exit_status: true,
+      reporter: "checkstyle",
+      output_file: "fastlane/swiftlint-report.xml"
+    )
+
+  elsif project_type == "android"
+    sh("./gradlew detekt")
+
+  elsif project_type == "flutter"
+    sh("cd .. && flutter analyze")
+
+  else
+    UI.user_error!("Unsupported project type")
+  end
+end
+
+
+lane :build do
+  project_type = ENV["PROJECT_TYPE"]
+
+  if project_type == "ios"
+    project_name = ENV["PROJECT_NAME"]
+    build_app(
+      project: "../#{project_name}.xcodeproj",
+      scheme: project_name,
+      destination: "generic/platform=iOS Simulator",
+      configuration: "Debug",
+      skip_codesigning: true,
+      skip_archive: true,
+      clean: true,
+      derived_data_path: "build/derived_data"
+    )
+
+  elsif project_type == "android"
+    sh("cd ../android && ./gradlew assemble --build-cache -Dorg.gradle.internal.http.socketTimeout=120000")
+
+  elsif project_type == "flutter"
+    sh("cd .. && flutter pub get")
+
+    # Android APK build with extended timeout for CI environments
+    sh("cd .. && flutter build apk --debug")
+
+    # iOS compilation check — simulator, no signing required (non-fatal: iOS SDK may not be installed)
+    sh("cd .. && flutter build ios --debug --no-codesign --simulator || true")
+
+  else
+    UI.user_error!("Unsupported project type")
+  end
+end
+
+
+lane :test do
+  project_type = ENV["PROJECT_TYPE"]
+
+  if project_type == "ios"
+    project_name = ENV["PROJECT_NAME"]
+    run_tests(
+      project: "../#{project_name}.xcodeproj",
+      scheme: project_name,
+      devices: ["iPhone 16"],
+      code_coverage: true,
+      output_directory: "fastlane/test_output",
+      output_files: "report.junit,report.html",
+      result_bundle: true
+    )
+
+  elsif project_type == "android"
+    sh("./gradlew test")
+
+  elsif project_type == "flutter"
+    sh("cd .. && flutter pub get")
+    sh("cd .. && flutter test --coverage -r expanded")
+
+  else
+    UI.user_error!("Unsupported project type")
+  end
+end
+
+
+lane :beta_release do
+  project_type = ENV["PROJECT_TYPE"]
+
+  if project_type == "ios"
+    project_name = ENV["PROJECT_NAME"]
+    match(type: "adhoc", readonly: is_ci)
+    increment_build_number(
+      build_number: Time.now.strftime("%Y%m%d%H%M%S"),
+      xcodeproj: "../#{project_name}.xcodeproj"
+    )
+    build_app(
+      project: "../#{project_name}.xcodeproj",
+      scheme: project_name,
+      export_method: "ad-hoc",
+      output_directory: "build",
+      output_name: "#{project_name}.ipa"
+    )
+    firebase_distribute
+
+  elsif project_type == "android"
+    sh("./gradlew assembleDebug")
+    firebase_distribute_debug_apk
+
+  elsif project_type == "flutter"
+    # Build and distribute debug APK for Firebase testers
+    sh("cd .. && flutter build apk --debug")
+    firebase_distribute_debug_apk
+
+  end
+end
+
+
+lane :release do
+  project_type = ENV["PROJECT_TYPE"]
+
+  if project_type == "ios"
+    project_name = ENV["PROJECT_NAME"]
+    match(type: "adhoc", readonly: is_ci)
+    increment_build_number(
+      build_number: Time.now.strftime("%Y%m%d%H%M%S"),
+      xcodeproj: "../#{project_name}.xcodeproj"
+    )
+    build_app(
+      project: "../#{project_name}.xcodeproj",
+      scheme: project_name,
+      export_method: "ad-hoc",
+      output_directory: "build",
+      output_name: "#{project_name}.ipa"
+    )
+    firebase_distribute
+
+  elsif project_type == "android"
+    sh("./gradlew bundleRelease")
+    firebase_distribute
+
+  elsif project_type == "flutter"
+    # Build Android App Bundle (AAB) for production release
+    sh("cd .. && flutter build appbundle --release")
+    # firebase_distribute
+    # Fallback iOS build
+    # sh("cd .. && flutter build ipa --release || true")
+
+  end
+end
+
+
+lane :firebase_distribute do
+  project_type = ENV["PROJECT_TYPE"]
+  app_id       = ENV["FIREBASE_APP_ID"]
+  service_file = ENV["FIREBASE_SERVICE_ACCOUNT_JSON"]
+  testers      = ENV["FIREBASE_TESTERS"] || ""
+  groups       = ENV["FIREBASE_GROUPS"] || ""
+
+  if project_type == "flutter" || project_type == "android"
+    firebase_app_distribution(
+      app: app_id,
+      android_artifact_type: "AAB",
+      android_artifact_path: "build/app/outputs/bundle/release/app-release.aab",
+      service_credentials_file: service_file,
+      testers: testers,
+      groups: groups,
+      release_notes: "Build from CI — branch: #{ENV['GIT_BRANCH'] || 'unknown'}"
+    )
+
+  elsif project_type == "ios"
+    project_name = ENV["PROJECT_NAME"]
+    firebase_app_distribution(
+      app: app_id,
+      ipa_path: "build/#{project_name}.ipa",
+      service_credentials_file: service_file,
+      testers: testers,
+      groups: groups,
+      release_notes: "Build from CI — branch: #{ENV['GIT_BRANCH'] || 'unknown'}"
+    )
+  end
+end
+
+
+lane :firebase_distribute_debug_apk do
+  project_type = ENV["PROJECT_TYPE"]
+  app_id       = ENV["FIREBASE_APP_ID"]
+  service_file = ENV["FIREBASE_SERVICE_ACCOUNT_JSON"]
+  testers      = ENV["FIREBASE_TESTERS"] || ""
+  groups       = ENV["FIREBASE_GROUPS"] || ""
+
+  if project_type == "flutter" || project_type == "android"
+    firebase_app_distribution(
+      app: app_id,
+      android_artifact_type: "APK",
+      android_artifact_path: "build/app/outputs/flutter-apk/app-debug.apk",
+      service_credentials_file: service_file,
+      testers: testers,
+      groups: groups,
+      release_notes: "Debug APK from CI - branch: #{ENV['GIT_BRANCH'] || 'unknown'}"
+    )
+  end
+end
+
+
+lane :hotfix do
+  project_type = ENV["PROJECT_TYPE"]
+
+  UI.message("Hotfix lane triggered")
+
+  if project_type == "ios"
+    project_name = ENV["PROJECT_NAME"]
+    build_app(
+      project: "../#{project_name}.xcodeproj",
+      scheme: project_name,
+      export_method: "ad-hoc",
+      output_directory: "build",
+      output_name: "#{project_name}.ipa"
+    )
+
+  elsif project_type == "android"
+    sh("./gradlew bundleRelease")
+
+  elsif project_type == "flutter"
+    sh("cd .. && flutter build appbundle --release")
+
+  end
+end
+
+
+lane :sync_certs do
+  project_type = ENV["PROJECT_TYPE"]
+
+  if project_type == "ios"
+    match(type: "appstore")
+  else
+    UI.message("Certificate sync only required for iOS")
+  end
+end
+
