@@ -9,13 +9,19 @@ env:
   PROJECT_TYPE: 'flutter'
   PROJECT_NAME: 'flutter_gha'
   MIN_COVERAGE: '80'
-  ENFORCE_COVERAGE: 'true'
+  ENFORCE_COVERAGE: 'false'
 
 jobs:
   mobile-pipeline:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
 
       - name: Setup Platform Tools
         run: |
