@@ -30,7 +30,7 @@ env:
   PROJECT_TYPE: 'flutter'
   PROJECT_NAME: 'flutter_gha'
   MIN_COVERAGE: '80'
-  ENFORCE_COVERAGE: 'false'
+  ENFORCE_COVERAGE: 'true'
 
 jobs:
   lint:
@@ -75,7 +75,19 @@ jobs:
         run: bash ci/setup.sh
       - name: Test
         run: bundle exec fastlane test
-
+      - name: Coverage gate
+        run: |
+          bash ci/coverage.sh
+          echo "### Coverage score: $(cat ci-artifacts/coverage-score.txt)%" >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload coverage
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: coverage
+          path: |
+            coverage/lcov.info
+            ci-artifacts/coverage-score.txt
+          if-no-files-found: ignore
       - name: Upload test reports
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

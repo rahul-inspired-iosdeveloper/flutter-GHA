@@ -121,6 +121,7 @@ app.*.symbols
 node_modules/
 vendor/bundle/
 firebase-service-account.json
+ci-artifacts/
+
 *.keystore
 *.jks
-ci-artifacts/
