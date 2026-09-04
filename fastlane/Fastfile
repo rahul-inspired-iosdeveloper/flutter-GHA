@@ -145,9 +145,7 @@ lane :release do
   elsif project_type == "flutter"
     # Build Android App Bundle (AAB) for production release
     sh("cd .. && flutter build appbundle --release")
-    # firebase_distribute
-    # Fallback iOS build
-    # sh("cd .. && flutter build ipa --release || true")
+    firebase_distribute
 
   end
 end
@@ -159,6 +157,13 @@ lane :firebase_distribute do
   service_file = ENV["FIREBASE_SERVICE_ACCOUNT_JSON"]
   testers      = ENV["FIREBASE_TESTERS"] || ""
   groups       = ENV["FIREBASE_GROUPS"] || ""
+
+  # Fail loudly rather than letting the plugin no-op on an empty app id or
+  # credentials file, which previously made a broken release look green.
+  UI.user_error!("FIREBASE_APP_ID is not set") if app_id.to_s.empty?
+  UI.user_error!("FIREBASE_SERVICE_ACCOUNT_JSON is not set") if service_file.to_s.empty?
+  UI.user_error!("Service account file not found: #{service_file}") unless File.exist?(service_file)
+  UI.user_error!("Neither FIREBASE_TESTERS nor FIREBASE_GROUPS is set") if testers.empty? && groups.empty?
 
   if project_type == "flutter" || project_type == "android"
     firebase_app_distribution(
