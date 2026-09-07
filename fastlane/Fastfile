@@ -1,23 +1,46 @@
 
 lane :lint do
   project_type = ENV["PROJECT_TYPE"]
+  enforce = ENV["LINT_ENFORCE"] != "false"
+  enforce_format = ENV["LINT_ENFORCE_FORMAT"] != "false"
+
+  # Formatting gate: run first so trivial formatting noise is reported
+  # separately from real rule violations. Android formatting is enforced by
+  # the Detekt ktlint ruleset below (formatting:autoCorrect), so no separate
+  # step is needed there.
+  if enforce_format
+    if project_type == "flutter"
+      sh("cd .. && dart format --output=none --set-exit-if-changed .")
+    end
+  end
 
   if project_type == "ios"
+    # Fatal lint: raise_if_swiftlint_error/ignore_exit_status are dropped so a
+    # violation can no longer pass the pipeline silently. --strict escalates
+    # formatting/readability violations to errors when the format gate is on.
     swiftlint(
       mode: :lint,
       executable: "/opt/homebrew/bin/swiftlint",
       config_file: "../.swiftlint.yml",
-      raise_if_swiftlint_error: false,
-      ignore_exit_status: true,
+      strict: enforce_format,
       reporter: "checkstyle",
-      output_file: "fastlane/swiftlint-report.xml"
+      output_file: "fastlane/swiftlint-report.xml",
+      ignore_exit_status: !enforce
     )
 
   elsif project_type == "android"
-    sh("./gradlew detekt")
+    # Run Detekt from the project directory (the previous ./gradlew detekt ran
+    # from fastlane/ where no Gradle wrapper exists). LINT_ENFORCE is baked
+    # into detekt.yml via build.maxIssues.
+    sh("cd .. && ./gradlew detekt")
 
   elsif project_type == "flutter"
-    sh("cd .. && flutter analyze")
+    # --fatal-infos escalates hints/infos to failures, matching LINT_ENFORCE.
+    analyze_args = enforce ? "--fatal-infos" : ""
+    sh("cd .. && flutter analyze #{analyze_args}")
+    # Numeric metrics and readability heuristics the analyzer cannot express;
+    # ci/metrics.sh honours LINT_ENFORCE itself.
+    sh("cd .. && bash ci/metrics.sh")
 
   else
     UI.user_error!("Unsupported project type")

@@ -8,6 +8,7 @@ if (keystorePropertiesFile.exists()) {
 }
 
 plugins {
+    id("io.gitlab.arturbosch.detekt") version "1.23.7"
     id("com.android.application")
     id("kotlin-android")
     // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
@@ -59,4 +60,11 @@ android {
 
 flutter {
     source = "../.."
+}
+
+
+detekt {
+    config = files(rootProject.projectDir.resolve("config/detekt/detekt.yml"))
+    buildUponDefaultConfig = true
+    allRules = true
 }
