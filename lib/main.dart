@@ -22,7 +22,7 @@ class MyApp extends StatelessWidget {
         // reload" button in a Flutter-supported IDE, or press "r" if you used
         // the command line to start the app).
         //
-        // Notice that the counter didn't reset back to zero; the application
+        // Notice that the counter didn't reset back to zero. The application
         // state is not lost during the reload. To reset the state, use hot
         // restart instead.
         //
@@ -54,7 +54,8 @@ class MyHomePage extends StatefulWidget {
 }
 
 class _MyHomePageState extends State<MyHomePage> {
-  int _counter = 0;
+  static const int _initialCounter = 0;
+  int _counter = _initialCounter;
 
   void _incrementCounter() {
     setState(() {
@@ -93,9 +94,9 @@ class _MyHomePageState extends State<MyHomePage> {
           // arranges them vertically. By default, it sizes itself to fit its
           // children horizontally, and tries to be as tall as its parent.
           //
-          // Column has various properties to control how it sizes itself and
+          // column has various properties to control how it sizes itself and
           // how it positions its children. Here we use mainAxisAlignment to
-          // center the children vertically; the main axis here is the vertical
+          // center the children vertically. The main axis here is the vertical
           // axis because Columns are vertical (the cross axis would be
           // horizontal).
           //
