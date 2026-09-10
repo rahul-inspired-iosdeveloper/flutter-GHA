@@ -122,7 +122,7 @@ done
 if ! rule_off no_magic_numbers; then
   for file in "${FILES[@]}"; do
     grep -nE '[^0-9a-zA-Z_.]([0-9]{1,2})(\.[0-9]+)?[^0-9a-zA-Z_.]' "$file" 2>/dev/null | \
-      grep -viE ':[0-9]+:\s*(import |part |export |const )' | \
+      grep -viE '^[0-9]+:[[:space:]]*(static[[:space:]]+)?(import |part |export |const )' | \
       grep -viE '0x|Duration|fontSize|textScale|spacing|padding|margin|\bversion\b|\.0[0-9]' | \
       while IFS=: read -r ln rest; do
         printf '%s:%s: magic number literal\n' "$file" "$ln" >> "$REPORT"
