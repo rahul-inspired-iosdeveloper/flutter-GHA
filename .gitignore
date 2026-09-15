@@ -124,8 +124,9 @@ firebase-service-account.json
 ci-artifacts/
 
 
-*.keystore
-*.jks
 fastlane/swiftlint-report.xml
 build/reports/detekt/
 *.zero-touch
+
+*.keystore
+*.jks
