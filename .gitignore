@@ -128,5 +128,6 @@ fastlane/swiftlint-report.xml
 build/reports/detekt/
 *.zero-touch
 
+
 *.keystore
 *.jks
