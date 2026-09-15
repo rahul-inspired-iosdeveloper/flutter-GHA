@@ -29,10 +29,10 @@ lane :lint do
     )
 
   elsif project_type == "android"
-    # Run Detekt from the project directory (the previous ./gradlew detekt ran
+    # Run Detekt from the project directory (the previous bash ./gradlew detekt ran
     # from fastlane/ where no Gradle wrapper exists). LINT_ENFORCE is baked
     # into detekt.yml via build.maxIssues.
-    sh("cd .. && ./gradlew detekt")
+    sh("cd .. && bash ./gradlew detekt")
 
   elsif project_type == "flutter"
     # --fatal-infos escalates hints/infos to failures, matching LINT_ENFORCE.
@@ -65,7 +65,7 @@ lane :build do
     )
 
   elsif project_type == "android"
-    sh("cd ../android && ./gradlew compileDebugSources --build-cache -Dorg.gradle.internal.http.socketTimeout=120000")
+    sh("cd ../android && bash ./gradlew compileDebugSources --build-cache -Dorg.gradle.internal.http.socketTimeout=120000")
 
   elsif project_type == "flutter"
     sh("cd .. && flutter pub get")
@@ -74,7 +74,7 @@ lane :build do
     # directly so it doesn't package a debug APK; release already produces
     # the real signed artifact via `flutter build appbundle --release`.
     if File.directory?("../android")
-      sh("cd ../android && ./gradlew compileDebugSources")
+      sh("cd ../android && bash ./gradlew compileDebugSources")
     end
 
     # iOS compilation check — simulator, no signing required
@@ -104,7 +104,7 @@ lane :test do
     )
 
   elsif project_type == "android"
-    sh("./gradlew test")
+    sh("bash ./gradlew test")
 
   elsif project_type == "flutter"
     sh("cd .. && flutter pub get")
@@ -203,8 +203,8 @@ lane :release_android do
   track = resolve_release_track
   UI.message("📦 Android release track: #{track}")
 
-  build_debug   = -> { project_type == "flutter" ? sh("cd .. && flutter build apk --debug") : sh("./gradlew assembleDebug") }
-  build_release = -> { project_type == "flutter" ? sh("cd .. && flutter build appbundle --release") : sh("./gradlew bundleRelease") }
+  build_debug   = -> { project_type == "flutter" ? sh("cd .. && flutter build apk --debug") : sh("bash ./gradlew assembleDebug") }
+  build_release = -> { project_type == "flutter" ? sh("cd .. && flutter build appbundle --release") : sh("bash ./gradlew bundleRelease") }
 
   case track
   when "beta"
@@ -296,7 +296,7 @@ lane :hotfix do
     )
 
   elsif project_type == "android"
-    sh("./gradlew bundleRelease")
+    sh("bash ./gradlew bundleRelease")
 
   elsif project_type == "flutter"
     sh("cd .. && flutter build appbundle --release")

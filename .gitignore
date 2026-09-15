@@ -130,5 +130,6 @@ build/reports/detekt/
 
 
 
+
 *.keystore
 *.jks
