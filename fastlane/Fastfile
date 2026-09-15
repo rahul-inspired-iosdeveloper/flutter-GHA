@@ -65,16 +65,22 @@ lane :build do
     )
 
   elsif project_type == "android"
-    sh("cd ../android && ./gradlew assemble --build-cache -Dorg.gradle.internal.http.socketTimeout=120000")
+    sh("cd ../android && ./gradlew compileDebugSources --build-cache -Dorg.gradle.internal.http.socketTimeout=120000")
 
   elsif project_type == "flutter"
     sh("cd .. && flutter pub get")
 
-    # Android APK build with extended timeout for CI environments
-    sh("cd .. && flutter build apk --debug")
+    # Compile-only Android check — runs the underlying Gradle compile task
+    # directly so it doesn't package a debug APK; release already produces
+    # the real signed artifact via `flutter build appbundle --release`.
+    if File.directory?("../android")
+      sh("cd ../android && ./gradlew compileDebugSources")
+    end
 
-    # iOS compilation check — simulator, no signing required (non-fatal: iOS SDK may not be installed)
-    sh("cd .. && flutter build ios --debug --no-codesign --simulator || true")
+    # iOS compilation check — simulator, no signing required
+    if File.directory?("../ios")
+      sh("cd .. && flutter build ios --debug --no-codesign --simulator")
+    end
 
   else
     UI.user_error!("Unsupported project type")
@@ -110,72 +116,116 @@ lane :test do
 end
 
 
-lane :beta_release do
+# The single source of truth for which release track a CI run is on. A tag
+# on HEAD selects the track: a beta_release_*/staging_release_*/prod_release_*
+# tag decides which one, not the branch. There is no fallback — a release
+# lane run against a commit with no matching tag is a mistake, not a beta.
+def resolve_release_track
+  tags = `git tag --points-at HEAD`.strip.split("\n").reject(&:empty?)
+
+  return "prod"    if tags.any? { |t| t.start_with?("prod_release_") }
+  return "staging" if tags.any? { |t| t.start_with?("staging_release_") }
+  return "beta"    if tags.any? { |t| t.start_with?("beta_release_") }
+
+  UI.user_error!("HEAD has no beta_release_*/staging_release_*/prod_release_* tag — nothing to release")
+end
+
+
+# iOS release for all three tracks. `beta` distributes to Firebase testers
+# (no store credentials needed); `staging` and `prod` build a store-signed
+# artifact and submit it to TestFlight / the App Store respectively. Runs in
+# parallel with :release_android via separate CI jobs/steps.
+lane :release_ios do
   project_type = ENV["PROJECT_TYPE"]
+  unless ["ios", "flutter"].include?(project_type)
+    next UI.message("Skipping iOS release — project type is #{project_type}")
+  end
 
-  if project_type == "ios"
-    project_name = ENV["PROJECT_NAME"]
-    match(type: "adhoc", readonly: is_ci)
-    increment_build_number(
-      build_number: Time.now.strftime("%Y%m%d%H%M%S"),
-      xcodeproj: "../#{project_name}.xcodeproj"
+  track = resolve_release_track
+  UI.message("📦 iOS release track: #{track}")
+
+  # Flutter's default `flutter create` scaffold names the Xcode project and
+  # scheme "Runner"; a native iOS project uses PROJECT_NAME for both.
+  project_name = project_type == "flutter" ? "Runner" : ENV["PROJECT_NAME"]
+  xcodeproj    = project_type == "flutter" ? "../ios/#{project_name}.xcodeproj" : "../#{project_name}.xcodeproj"
+
+  # TestFlight/App Store submission (pilot/deliver) needs an authenticated
+  # App Store Connect session; readonly cert fetching for the beta/adhoc
+  # track does not.
+  unless track == "beta"
+    app_store_connect_api_key(
+      key_id: ENV["ASC_KEY_ID"],
+      issuer_id: ENV["ASC_ISSUER_ID"],
+      key_content: ENV["ASC_KEY_CONTENT"],
+      is_key_content_base64: true
     )
-    build_app(
-      project: "../#{project_name}.xcodeproj",
-      scheme: project_name,
-      export_method: "ad-hoc",
-      output_directory: "build",
-      output_name: "#{project_name}.ipa"
+  end
+
+  match_type = track == "beta" ? "adhoc" : "appstore"
+  match(type: match_type, readonly: is_ci)
+  increment_build_number(
+    build_number: Time.now.strftime("%Y%m%d%H%M%S"),
+    xcodeproj: xcodeproj
+  )
+  build_app(
+    project: xcodeproj,
+    scheme: project_name,
+    export_method: track == "beta" ? "ad-hoc" : "app-store",
+    output_directory: "build",
+    output_name: "#{project_name}.ipa"
+  )
+
+  case track
+  when "beta"
+    firebase_distribute(platform: "ios")
+  when "staging"
+    pilot(skip_waiting_for_build_processing: true)
+  when "prod"
+    deliver(
+      submit_for_review: false,
+      automatic_release: false,
+      force: true,
+      skip_screenshots: true,
+      skip_metadata: true
     )
-    firebase_distribute
-
-  elsif project_type == "android"
-    sh("./gradlew assembleDebug")
-    firebase_distribute_debug_apk
-
-  elsif project_type == "flutter"
-    # Build and distribute debug APK for Firebase testers
-    sh("cd .. && flutter build apk --debug")
-    firebase_distribute_debug_apk
-
   end
 end
 
 
-lane :release do
+# Android release for all three tracks — mirrors :release_ios but for Play.
+# Runs in parallel with :release_ios via separate CI jobs/steps.
+lane :release_android do
   project_type = ENV["PROJECT_TYPE"]
+  unless ["android", "flutter"].include?(project_type)
+    next UI.message("Skipping Android release — project type is #{project_type}")
+  end
 
-  if project_type == "ios"
-    project_name = ENV["PROJECT_NAME"]
-    match(type: "adhoc", readonly: is_ci)
-    increment_build_number(
-      build_number: Time.now.strftime("%Y%m%d%H%M%S"),
-      xcodeproj: "../#{project_name}.xcodeproj"
-    )
-    build_app(
-      project: "../#{project_name}.xcodeproj",
-      scheme: project_name,
-      export_method: "ad-hoc",
-      output_directory: "build",
-      output_name: "#{project_name}.ipa"
-    )
-    firebase_distribute
+  track = resolve_release_track
+  UI.message("📦 Android release track: #{track}")
 
-  elsif project_type == "android"
-    sh("./gradlew bundleRelease")
-    firebase_distribute
+  build_debug   = -> { project_type == "flutter" ? sh("cd .. && flutter build apk --debug") : sh("./gradlew assembleDebug") }
+  build_release = -> { project_type == "flutter" ? sh("cd .. && flutter build appbundle --release") : sh("./gradlew bundleRelease") }
 
-  elsif project_type == "flutter"
-    # Build Android App Bundle (AAB) for production release
-    sh("cd .. && flutter build appbundle --release")
-    firebase_distribute
-
+  case track
+  when "beta"
+    build_debug.call
+    firebase_distribute_debug_apk
+  when "staging"
+    build_release.call
+    upload_to_play_store(track: "internal", skip_upload_metadata: true, skip_upload_images: true, skip_upload_screenshots: true)
+  when "prod"
+    build_release.call
+    upload_to_play_store(track: "production", release_status: "draft", skip_upload_metadata: true, skip_upload_images: true, skip_upload_screenshots: true)
   end
 end
 
 
-lane :firebase_distribute do
-  project_type = ENV["PROJECT_TYPE"]
+# Distributes a signed release artifact to Firebase App Distribution.
+# `platform:` picks which artifact to look for — it is passed explicitly by
+# :release_ios/:release_android rather than inferred from PROJECT_TYPE, since
+# a flutter project builds both an ipa and an aab in the same release.
+lane :firebase_distribute do |options|
+  platform     = options[:platform]
   app_id       = ENV["FIREBASE_APP_ID"]
   service_file = ENV["FIREBASE_SERVICE_ACCOUNT_JSON"]
   testers      = ENV["FIREBASE_TESTERS"] || ""
@@ -188,22 +238,21 @@ lane :firebase_distribute do
   UI.user_error!("Service account file not found: #{service_file}") unless File.exist?(service_file)
   UI.user_error!("Neither FIREBASE_TESTERS nor FIREBASE_GROUPS is set") if testers.empty? && groups.empty?
 
-  if project_type == "flutter" || project_type == "android"
+  if platform == "ios"
+    project_name = ENV["PROJECT_TYPE"] == "flutter" ? "Runner" : ENV["PROJECT_NAME"]
     firebase_app_distribution(
       app: app_id,
-      android_artifact_type: "AAB",
-      android_artifact_path: "build/app/outputs/bundle/release/app-release.aab",
+      ipa_path: "build/#{project_name}.ipa",
       service_credentials_file: service_file,
       testers: testers,
       groups: groups,
       release_notes: "Build from CI — branch: #{ENV['GIT_BRANCH'] || 'unknown'}"
     )
-
-  elsif project_type == "ios"
-    project_name = ENV["PROJECT_NAME"]
+  else
     firebase_app_distribution(
       app: app_id,
-      ipa_path: "build/#{project_name}.ipa",
+      android_artifact_type: "AAB",
+      android_artifact_path: "build/app/outputs/bundle/release/app-release.aab",
       service_credentials_file: service_file,
       testers: testers,
       groups: groups,
@@ -214,23 +263,20 @@ end
 
 
 lane :firebase_distribute_debug_apk do
-  project_type = ENV["PROJECT_TYPE"]
   app_id       = ENV["FIREBASE_APP_ID"]
   service_file = ENV["FIREBASE_SERVICE_ACCOUNT_JSON"]
   testers      = ENV["FIREBASE_TESTERS"] || ""
   groups       = ENV["FIREBASE_GROUPS"] || ""
 
-  if project_type == "flutter" || project_type == "android"
-    firebase_app_distribution(
-      app: app_id,
-      android_artifact_type: "APK",
-      android_artifact_path: "build/app/outputs/flutter-apk/app-debug.apk",
-      service_credentials_file: service_file,
-      testers: testers,
-      groups: groups,
-      release_notes: "Debug APK from CI - branch: #{ENV['GIT_BRANCH'] || 'unknown'}"
-    )
-  end
+  firebase_app_distribution(
+    app: app_id,
+    android_artifact_type: "APK",
+    android_artifact_path: "build/app/outputs/flutter-apk/app-debug.apk",
+    service_credentials_file: service_file,
+    testers: testers,
+    groups: groups,
+    release_notes: "Debug APK from CI - branch: #{ENV['GIT_BRANCH'] || 'unknown'}"
+  )
 end
 
 
@@ -255,17 +301,6 @@ lane :hotfix do
   elsif project_type == "flutter"
     sh("cd .. && flutter build appbundle --release")
 
-  end
-end
-
-
-lane :sync_certs do
-  project_type = ENV["PROJECT_TYPE"]
-
-  if project_type == "ios"
-    match(type: "appstore")
-  else
-    UI.message("Certificate sync only required for iOS")
   end
 end
 

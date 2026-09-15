@@ -129,5 +129,6 @@ build/reports/detekt/
 *.zero-touch
 
 
+
 *.keystore
 *.jks
