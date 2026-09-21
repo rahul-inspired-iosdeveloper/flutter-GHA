@@ -5,9 +5,10 @@ ZeroTouchScript/
 node_modules/
 vendor/bundle/
 firebase-service-account.json
-*.keystore
-*.jks
 ci-artifacts/
 fastlane/swiftlint-report.xml
 build/reports/detekt/
 *.zero-touch
+
+*.keystore
+*.jks
