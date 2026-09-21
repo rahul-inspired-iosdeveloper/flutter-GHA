@@ -1,0 +1,348 @@
+
+lane :lint do
+  project_type = ENV["PROJECT_TYPE"]
+  enforce = ENV["LINT_ENFORCE"] != "false"
+  enforce_format = ENV["LINT_ENFORCE_FORMAT"] != "false"
+
+  # Formatting gate: run first so trivial formatting noise is reported
+  # separately from real rule violations. Android formatting is enforced by
+  # the Detekt ktlint ruleset below (formatting:autoCorrect), so no separate
+  # step is needed there.
+  if enforce_format
+    if project_type == "flutter"
+      sh("cd .. && dart format --output=none --set-exit-if-changed .")
+    end
+  end
+
+  if project_type == "ios"
+    # Fatal lint: raise_if_swiftlint_error/ignore_exit_status are dropped so a
+    # violation can no longer pass the pipeline silently. --strict escalates
+    # formatting/readability violations to errors when the format gate is on.
+    swiftlint(
+      mode: :lint,
+      executable: "/opt/homebrew/bin/swiftlint",
+      config_file: "../.swiftlint.yml",
+      strict: enforce_format,
+      reporter: "checkstyle",
+      output_file: "fastlane/swiftlint-report.xml",
+      ignore_exit_status: !enforce
+    )
+
+  elsif project_type == "android"
+    # Run Detekt from the project directory (the previous bash ./gradlew detekt ran
+    # from fastlane/ where no Gradle wrapper exists). LINT_ENFORCE is baked
+    # into detekt.yml via build.maxIssues.
+    sh("cd .. && bash ./gradlew detekt")
+
+  elsif project_type == "flutter"
+    # --fatal-infos escalates hints/infos to failures, matching LINT_ENFORCE.
+    analyze_args = enforce ? "--fatal-infos" : ""
+    sh("cd .. && flutter analyze #{analyze_args}")
+    # Numeric metrics and readability heuristics the analyzer cannot express;
+    # ci/metrics.sh honours LINT_ENFORCE itself.
+    sh("cd .. && bash ci/metrics.sh")
+
+  else
+    UI.user_error!("Unsupported project type")
+  end
+end
+
+
+lane :build do
+  project_type = ENV["PROJECT_TYPE"]
+
+  if project_type == "ios"
+    project_name = ENV["PROJECT_NAME"]
+    build_app(
+      project: "../#{project_name}.xcodeproj",
+      scheme: project_name,
+      destination: "generic/platform=iOS Simulator",
+      configuration: "Debug",
+      skip_codesigning: true,
+      skip_archive: true,
+      clean: true,
+      derived_data_path: "build/derived_data"
+    )
+
+  elsif project_type == "android"
+    sh("cd ../android && bash ./gradlew compileDebugSources --build-cache -Dorg.gradle.internal.http.socketTimeout=120000")
+
+  elsif project_type == "flutter"
+    sh("cd .. && flutter pub get")
+
+    build_platform = ENV["BUILD_PLATFORM"]
+
+    # Compile-only Android check
+    if build_platform.nil? || build_platform == "android"
+      if File.directory?("../android")
+        sh("cd ../android && bash ./gradlew compileDebugSources")
+      end
+    end
+
+    # iOS compilation check - Generic iOS Device without code signing
+    if build_platform.nil? || build_platform == "ios"
+      if File.directory?("../ios")
+        if RUBY_PLATFORM.include?("darwin")
+          sh("cd .. && flutter build ios --debug --no-codesign")
+        else
+          UI.message("Skipping iOS build check on non-macOS environment.")
+        end
+      end
+    end
+
+  else
+    UI.user_error!("Unsupported project type")
+  end
+end
+
+
+lane :test do
+  project_type = ENV["PROJECT_TYPE"]
+
+  if project_type == "ios"
+    project_name = ENV["PROJECT_NAME"]
+    run_tests(
+      project: "../#{project_name}.xcodeproj",
+      scheme: project_name,
+      devices: ["iPhone 16"],
+      code_coverage: true,
+      output_directory: "fastlane/test_output",
+      output_files: "report.junit,report.html",
+      result_bundle: true
+    )
+
+  elsif project_type == "android"
+    sh("bash ./gradlew test")
+
+  elsif project_type == "flutter"
+    sh("cd .. && flutter pub get")
+    sh("cd .. && flutter test --coverage -r expanded")
+
+  else
+    UI.user_error!("Unsupported project type")
+  end
+end
+
+
+# The single source of truth for which release track a CI run is on. A tag
+# on HEAD selects the track: a beta_release_*/staging_release_*/prod_release_*
+# tag decides which one, not the branch. There is no fallback — a release
+# lane run against a commit with no matching tag is a mistake, not a beta.
+def resolve_release_track
+  tags = `git tag --points-at HEAD`.strip.split("\n").reject(&:empty?)
+
+  return "prod"    if tags.any? { |t| t.start_with?("prod_release_") }
+  return "staging" if tags.any? { |t| t.start_with?("staging_release_") }
+  return "beta"    if tags.any? { |t| t.start_with?("beta_release_") }
+
+  UI.user_error!("HEAD has no beta_release_*/staging_release_*/prod_release_* tag — nothing to release")
+end
+
+
+# Fails fast with one clearly formatted message naming every missing env
+# var, instead of letting the release run partway and hit an opaque error
+# from whichever third-party fastlane action needed that credential.
+def check_required_env!(context, *vars)
+  missing = vars.select { |v| ENV[v].to_s.strip.empty? }
+  return if missing.empty?
+
+  UI.user_error!("❌ Missing credentials for #{context}: #{missing.join(', ')}")
+end
+
+
+# iOS release for all three tracks. `beta` distributes to Firebase testers
+# (no store credentials needed); `staging` and `prod` build a store-signed
+# artifact and submit it to TestFlight / the App Store respectively. Runs in
+# parallel with :release_android via separate CI jobs/steps.
+lane :release_ios do
+  project_type = ENV["PROJECT_TYPE"]
+  unless ["ios", "flutter"].include?(project_type)
+    next UI.message("Skipping iOS release — project type is #{project_type}")
+  end
+
+  track = resolve_release_track
+  UI.message("📦 iOS release track: #{track}")
+
+  # Validated up front — before match/build_app do any work — so a missing
+  # credential fails immediately with a clear message naming exactly what's
+  # absent, not partway through a build with a raw third-party error.
+  check_required_env!("iOS #{track} release (code signing)", "MATCH_GIT_URL", "MATCH_PASSWORD")
+  if track == "beta"
+    check_required_env!("iOS beta release (Firebase)", "FIREBASE_APP_ID", "FIREBASE_SERVICE_ACCOUNT_JSON")
+    if ENV["FIREBASE_TESTERS"].to_s.empty? && ENV["FIREBASE_GROUPS"].to_s.empty?
+      UI.user_error!("❌ Missing credentials for iOS beta release: FIREBASE_TESTERS or FIREBASE_GROUPS")
+    end
+  else
+    check_required_env!("iOS #{track} release (App Store Connect)", "ASC_KEY_ID", "ASC_ISSUER_ID", "ASC_KEY_CONTENT")
+  end
+
+  # Flutter's default `flutter create` scaffold names the Xcode project and
+  # scheme "Runner"; a native iOS project uses PROJECT_NAME for both.
+  project_name = project_type == "flutter" ? "Runner" : ENV["PROJECT_NAME"]
+  xcodeproj    = project_type == "flutter" ? "../ios/#{project_name}.xcodeproj" : "../#{project_name}.xcodeproj"
+
+  # TestFlight/App Store submission (pilot/deliver) needs an authenticated
+  # App Store Connect session; readonly cert fetching for the beta/adhoc
+  # track does not.
+  unless track == "beta"
+    app_store_connect_api_key(
+      key_id: ENV["ASC_KEY_ID"],
+      issuer_id: ENV["ASC_ISSUER_ID"],
+      key_content: ENV["ASC_KEY_CONTENT"],
+      is_key_content_base64: true
+    )
+  end
+
+  match_type = track == "beta" ? "adhoc" : "appstore"
+  match(type: match_type, readonly: is_ci)
+  increment_build_number(
+    build_number: Time.now.strftime("%Y%m%d%H%M%S"),
+    xcodeproj: xcodeproj
+  )
+  build_app(
+    project: xcodeproj,
+    scheme: project_name,
+    export_method: track == "beta" ? "ad-hoc" : "app-store",
+    output_directory: "build",
+    output_name: "#{project_name}.ipa"
+  )
+
+  case track
+  when "beta"
+    firebase_distribute(platform: "ios")
+  when "staging"
+    pilot(skip_waiting_for_build_processing: true)
+  when "prod"
+    deliver(
+      submit_for_review: false,
+      automatic_release: false,
+      force: true,
+      skip_screenshots: true,
+      skip_metadata: true
+    )
+  end
+end
+
+
+# Android release for all three tracks — mirrors :release_ios but for Play.
+# Runs in parallel with :release_ios via separate CI jobs/steps.
+lane :release_android do
+  project_type = ENV["PROJECT_TYPE"]
+  unless ["android", "flutter"].include?(project_type)
+    next UI.message("Skipping Android release — project type is #{project_type}")
+  end
+
+  track = resolve_release_track
+  UI.message("📦 Android release track: #{track}")
+
+  # Validated up front — before any build runs — so a missing credential
+  # fails immediately with a clear message naming exactly what's absent.
+  if track == "beta"
+    check_required_env!("Android beta release (Firebase)", "FIREBASE_APP_ID", "FIREBASE_SERVICE_ACCOUNT_JSON")
+    if ENV["FIREBASE_TESTERS"].to_s.empty? && ENV["FIREBASE_GROUPS"].to_s.empty?
+      UI.user_error!("❌ Missing credentials for Android beta release: FIREBASE_TESTERS or FIREBASE_GROUPS")
+    end
+  else
+    check_required_env!("Android #{track} release (Play Store)", "SUPPLY_JSON_KEY_DATA")
+  end
+
+  build_debug   = -> { project_type == "flutter" ? sh("cd .. && flutter build apk --debug") : sh("bash ./gradlew assembleDebug") }
+  build_release = -> { project_type == "flutter" ? sh("cd .. && flutter build appbundle --release") : sh("bash ./gradlew bundleRelease") }
+
+  case track
+  when "beta"
+    build_debug.call
+    firebase_distribute_debug_apk
+  when "staging"
+    build_release.call
+    upload_to_play_store(track: "internal", skip_upload_metadata: true, skip_upload_images: true, skip_upload_screenshots: true)
+  when "prod"
+    build_release.call
+    upload_to_play_store(track: "production", release_status: "draft", skip_upload_metadata: true, skip_upload_images: true, skip_upload_screenshots: true)
+  end
+end
+
+
+# Distributes a signed release artifact to Firebase App Distribution.
+# `platform:` picks which artifact to look for — it is passed explicitly by
+# :release_ios/:release_android rather than inferred from PROJECT_TYPE, since
+# a flutter project builds both an ipa and an aab in the same release.
+lane :firebase_distribute do |options|
+  platform     = options[:platform]
+  app_id       = ENV["FIREBASE_APP_ID"]
+  service_file = ENV["FIREBASE_SERVICE_ACCOUNT_JSON"]
+  testers      = ENV["FIREBASE_TESTERS"] || ""
+  groups       = ENV["FIREBASE_GROUPS"] || ""
+
+  # Credential presence is already validated by release_ios/release_android
+  # before this lane is called. This is a distinct disk-level check — the
+  # CI "Write Firebase Service Account" step writes the file conditionally,
+  # so confirm it actually landed rather than assuming it did.
+  UI.user_error!("Service account file not found: #{service_file}") unless File.exist?(service_file)
+
+  if platform == "ios"
+    project_name = ENV["PROJECT_TYPE"] == "flutter" ? "Runner" : ENV["PROJECT_NAME"]
+    firebase_app_distribution(
+      app: app_id,
+      ipa_path: "build/#{project_name}.ipa",
+      service_credentials_file: service_file,
+      testers: testers,
+      groups: groups,
+      release_notes: "Build from CI — branch: #{ENV['GIT_BRANCH'] || 'unknown'}"
+    )
+  else
+    firebase_app_distribution(
+      app: app_id,
+      android_artifact_type: "AAB",
+      android_artifact_path: "build/app/outputs/bundle/release/app-release.aab",
+      service_credentials_file: service_file,
+      testers: testers,
+      groups: groups,
+      release_notes: "Build from CI — branch: #{ENV['GIT_BRANCH'] || 'unknown'}"
+    )
+  end
+end
+
+
+lane :firebase_distribute_debug_apk do
+  app_id       = ENV["FIREBASE_APP_ID"]
+  service_file = ENV["FIREBASE_SERVICE_ACCOUNT_JSON"]
+  testers      = ENV["FIREBASE_TESTERS"] || ""
+  groups       = ENV["FIREBASE_GROUPS"] || ""
+
+  firebase_app_distribution(
+    app: app_id,
+    android_artifact_type: "APK",
+    android_artifact_path: "build/app/outputs/flutter-apk/app-debug.apk",
+    service_credentials_file: service_file,
+    testers: testers,
+    groups: groups,
+    release_notes: "Debug APK from CI - branch: #{ENV['GIT_BRANCH'] || 'unknown'}"
+  )
+end
+
+
+lane :hotfix do
+  project_type = ENV["PROJECT_TYPE"]
+
+  UI.message("Hotfix lane triggered")
+
+  if project_type == "ios"
+    project_name = ENV["PROJECT_NAME"]
+    build_app(
+      project: "../#{project_name}.xcodeproj",
+      scheme: project_name,
+      export_method: "ad-hoc",
+      output_directory: "build",
+      output_name: "#{project_name}.ipa"
+    )
+
+  elsif project_type == "android"
+    sh("bash ./gradlew bundleRelease")
+
+  elsif project_type == "flutter"
+    sh("cd .. && flutter build appbundle --release")
+
+  end
+end
+

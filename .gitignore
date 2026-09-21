@@ -1,0 +1,13 @@
+
+# --- zero_touch v2.0 ---
+ZeroTouchScript/
+.env
+node_modules/
+vendor/bundle/
+firebase-service-account.json
+*.keystore
+*.jks
+ci-artifacts/
+fastlane/swiftlint-report.xml
+build/reports/detekt/
+*.zero-touch
