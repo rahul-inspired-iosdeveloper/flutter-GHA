@@ -265,7 +265,7 @@ jobs:
       - name: Notify Teams (failure)
         env:
           TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
-        run: | 
+        run: |
           bash ci/notify_teams.sh failure "Pipeline" "Mobile CI failed for $PROJECT_NAME on $GITHUB_REF_NAME (run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID)"
 
   notify_pr_build_success:
