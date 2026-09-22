@@ -1,4 +1,20 @@
 
+# android/gradlew is not checked into the repo (it was previously
+# .gitignore'd and never committed), so bootstrap it on demand from the
+# system `gradle` install rather than assuming it exists on disk.
+def ensure_gradle_wrapper(dir)
+  return if File.exist?("#{dir}/gradlew")
+
+  unless system("command -v gradle >/dev/null 2>&1")
+    UI.user_error!("#{dir}/gradlew is missing and no system `gradle` is available to generate it")
+  end
+
+  UI.message("#{dir}/gradlew not found — generating it with `gradle wrapper`")
+  sh("cd #{dir} && gradle wrapper")
+  sh("chmod +x #{dir}/gradlew")
+end
+
+
 lane :lint do
   project_type = ENV["PROJECT_TYPE"]
   enforce = ENV["LINT_ENFORCE"] != "false"
@@ -65,6 +81,7 @@ lane :build do
     )
 
   elsif project_type == "android"
+    ensure_gradle_wrapper("../android")
     sh("cd ../android && bash ./gradlew compileDebugSources --build-cache -Dorg.gradle.internal.http.socketTimeout=120000")
 
   elsif project_type == "flutter"
@@ -75,6 +92,7 @@ lane :build do
     # Compile-only Android check
     if build_platform.nil? || build_platform == "android"
       if File.directory?("../android")
+        ensure_gradle_wrapper("../android")
         sh("cd ../android && bash ./gradlew compileDebugSources")
       end
     end
